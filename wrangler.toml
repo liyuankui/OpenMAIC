@@ -1,0 +1,31 @@
+# Cloudflare Pages configuration for OpenMAIC frontend
+# This configures the static frontend deployment
+
+name = "openmaic-frontend"
+compatibility_date = "2024-01-01"
+
+# Build configuration for Next.js static export
+[build]
+command = "npm run build"
+cwd = "./"
+
+# Directory containing the static export
+[build.upload]
+format = "modules"
+main = "./.next/server/app/pages-manifest.json"
+
+# Environment variables (add API backend URL here)
+[vars]
+# API backend URL (will be set to Railway/Render deployment)
+NEXT_PUBLIC_API_URL = "https://your-backend-url.railway.app"
+
+# Routing rules for single-page app support
+[[routes]]
+pattern = "/api/*"
+# Don't proxy API routes - they go to Railway backend
+zone_status = 404
+
+[[routes]]
+pattern = "/*"
+# Rewrite all other routes to index.html for SPA support
+fallback = "/index.html"
