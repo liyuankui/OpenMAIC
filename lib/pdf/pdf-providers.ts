@@ -138,7 +138,7 @@
  */
 
 import { extractText, getDocumentProxy, extractImages } from 'unpdf';
-import sharp from 'sharp';
+// sharp is Node.js only — lazy loaded for Cloudflare Workers compat
 import type { PDFParserConfig } from './types';
 import type { ParsedPdfContent } from '@/lib/types/pdf';
 import { PDF_PROVIDERS } from './constants';
@@ -218,19 +218,24 @@ async function parseWithUnpdf(pdfBuffer: Buffer): Promise<ParsedPdfContent> {
       for (let i = 0; i < pageImages.length; i++) {
         const imgData = pageImages[i];
         try {
-          // Use sharp to convert raw image data to PNG base64
-          const pngBuffer = await sharp(Buffer.from(imgData.data), {
-            raw: {
-              width: imgData.width,
-              height: imgData.height,
-              channels: imgData.channels,
-            },
-          })
-            .png()
-            .toBuffer();
-
-          // Convert to base64
-          const base64 = `data:image/png;base64,${pngBuffer.toString('base64')}`;
+          // sharp is Node.js only — dynamic require with fallback for Workers
+          let base64: string;
+          try {
+            const sharp = require(/* webpack-ignore: true */ 'sharp');
+            const pngBuffer = await sharp(Buffer.from(imgData.data), {
+              raw: {
+                width: imgData.width,
+                height: imgData.height,
+                channels: imgData.channels,
+              },
+            })
+              .png()
+              .toBuffer();
+            base64 = `data:image/png;base64,${pngBuffer.toString('base64')}`;
+          } catch {
+            // Fallback: raw base64 without PNG conversion (Workers / no sharp)
+            base64 = `data:image/png;base64,${Buffer.from(imgData.data).toString('base64')}`;
+          }
           imageCounter++;
           const imgId = `img_${imageCounter}`;
           images.push(base64);

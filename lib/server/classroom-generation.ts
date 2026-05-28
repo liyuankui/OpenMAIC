@@ -17,6 +17,7 @@ import { parseModelString } from '@/lib/ai/providers';
 import { resolveApiKey } from '@/lib/server/provider-config';
 import { resolveModel } from '@/lib/server/resolve-model';
 import { persistClassroom } from '@/lib/server/classroom-storage';
+import { isCloudflareAI, cfAICall } from '@/lib/server/cf-ai';
 import type { UserRequirements } from '@/lib/types/generation';
 import type { Scene, Stage } from '@/lib/types/stage';
 
@@ -99,33 +100,37 @@ export async function generateClassroom(
     scenesGenerated: 0,
   });
 
-  const { model: languageModel, modelInfo, modelString } = resolveModel({});
-  log.info(`Using server-configured model: ${modelString}`);
-
-  // Fail fast if the resolved provider has no API key configured
-  const { providerId } = parseModelString(modelString);
-  const apiKey = resolveApiKey(providerId);
-  if (!apiKey) {
-    throw new Error(
-      `No API key configured for provider "${providerId}". ` +
-        `Set the appropriate key in .env.local or server-providers.yml (e.g. ${providerId.toUpperCase()}_API_KEY).`,
-    );
+  // Cloudflare Workers AI (free, no API key needed)
+  let aiCall: AICallFn;
+  if (isCloudflareAI()) {
+    log.info('Using Cloudflare Workers AI');
+    aiCall = cfAICall;
+  } else {
+    const { model: languageModel, modelInfo, modelString } = resolveModel({});
+    log.info(`Using server-configured model: ${modelString}`);
+    const { providerId } = parseModelString(modelString);
+    const apiKey = resolveApiKey(providerId);
+    if (!apiKey) {
+      throw new Error(
+        `No API key configured for provider "${providerId}". ` +
+          `Set the appropriate key in .env.local or server-providers.yml (e.g. ${providerId.toUpperCase()}_API_KEY).`,
+      );
+    }
+    aiCall = async (systemPrompt, userPrompt, _images) => {
+      const result = await callLLM(
+        {
+          model: languageModel,
+          messages: [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: userPrompt },
+          ],
+          maxOutputTokens: modelInfo?.outputWindow,
+        },
+        'generate-classroom',
+      );
+      return result.text;
+    };
   }
-
-  const aiCall: AICallFn = async (systemPrompt, userPrompt, _images) => {
-    const result = await callLLM(
-      {
-        model: languageModel,
-        messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: userPrompt },
-        ],
-        maxOutputTokens: modelInfo?.outputWindow,
-      },
-      'generate-classroom',
-    );
-    return result.text;
-  };
 
   const lang = normalizeLanguage(input.language);
   const requirements: UserRequirements = {

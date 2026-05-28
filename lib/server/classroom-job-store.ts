@@ -11,6 +11,7 @@ import {
   ensureClassroomJobsDir,
   writeJsonFileAtomic,
 } from '@/lib/server/classroom-storage';
+import { getCloudflareContext } from '@opennextjs/cloudflare';
 
 export type ClassroomGenerationJobStatus = 'queued' | 'running' | 'succeeded' | 'failed';
 
@@ -99,6 +100,28 @@ export function isValidClassroomJobId(jobId: string): boolean {
   return /^[a-zA-Z0-9_-]+$/.test(jobId);
 }
 
+// ── Cloudflare runtime detection ──
+
+let _isCF: boolean | null = null;
+function isCF(): boolean {
+  if (_isCF !== null) return _isCF;
+  try {
+    const ctx = getCloudflareContext() as any;
+    _isCF = !!ctx?.env?.CLASSROOM_DO;
+  } catch {
+    _isCF = false;
+  }
+  return _isCF;
+}
+
+function getDOStub() {
+  const { env } = getCloudflareContext() as any;
+  const id = env.CLASSROOM_DO.idFromName('global');
+  return env.CLASSROOM_DO.get(id);
+}
+
+// ── Job CRUD ──
+
 export async function createClassroomGenerationJob(
   jobId: string,
   input: GenerateClassroomInput,
@@ -116,6 +139,17 @@ export async function createClassroomGenerationJob(
     scenesGenerated: 0,
   };
 
+  if (isCF()) {
+    const stub = getDOStub();
+    await stub.fetch(new Request('http://do/job', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(job),
+    }));
+    return job;
+  }
+
+  // Node.js path
   await ensureClassroomJobsDir();
   await writeJsonFileAtomic(jobFilePath(jobId), job);
   return job;
@@ -124,6 +158,15 @@ export async function createClassroomGenerationJob(
 export async function readClassroomGenerationJob(
   jobId: string,
 ): Promise<ClassroomGenerationJob | null> {
+  if (isCF()) {
+    const stub = getDOStub();
+    const res = await stub.fetch(new Request(`http://do/job/${jobId}`));
+    if (res.status === 404) return null;
+    const job = await res.json() as ClassroomGenerationJob;
+    return markStaleIfNeeded(job);
+  }
+
+  // Node.js path
   try {
     const content = await fs.readFile(jobFilePath(jobId), 'utf-8');
     const job = JSON.parse(content) as ClassroomGenerationJob;
@@ -140,6 +183,18 @@ export async function updateClassroomGenerationJob(
   jobId: string,
   patch: Partial<ClassroomGenerationJob>,
 ): Promise<ClassroomGenerationJob> {
+  if (isCF()) {
+    const stub = getDOStub();
+    const res = await stub.fetch(new Request(`http://do/job/${jobId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(patch),
+    }));
+    if (res.status === 404) throw new Error(`Classroom generation job not found: ${jobId}`);
+    return res.json();
+  }
+
+  // Node.js path
   return withJobLock(jobId, async () => {
     const existing = await readClassroomGenerationJob(jobId);
     if (!existing) {
@@ -160,6 +215,14 @@ export async function updateClassroomGenerationJob(
 export async function markClassroomGenerationJobRunning(
   jobId: string,
 ): Promise<ClassroomGenerationJob> {
+  if (isCF()) {
+    return updateClassroomGenerationJob(jobId, {
+      status: 'running',
+      startedAt: new Date().toISOString(),
+      message: 'Classroom generation started',
+    });
+  }
+
   return withJobLock(jobId, async () => {
     const existing = await readClassroomGenerationJob(jobId);
     if (!existing) {

@@ -2,7 +2,8 @@
  * Prompt Loader - Loads prompts from markdown files
  *
  * Supports:
- * - Loading prompts from templates/{promptId}/ directory
+ * - Bundled prompts (Workers runtime, no fs)
+ * - Filesystem prompts (Node.js runtime)
  * - Snippet inclusion via {{snippet:name}} syntax
  * - Variable interpolation via {{variable}} syntax
  * - Caching for performance
@@ -12,29 +13,30 @@ import fs from 'fs';
 import path from 'path';
 import type { PromptId, LoadedPrompt, SnippetId } from './types';
 import { createLogger } from '@/lib/logger';
+import { bundledPrompts, bundledSnippets } from './bundled-prompts';
 const log = createLogger('PromptLoader');
 
 // Cache for loaded prompts and snippets
 const promptCache = new Map<string, LoadedPrompt>();
 const snippetCache = new Map<string, string>();
 
-/**
- * Get the prompts directory path
- */
 function getPromptsDir(): string {
-  // In Next.js, use process.cwd() for the project root
   return path.join(process.cwd(), 'lib', 'generation', 'prompts');
 }
 
-/**
- * Load a snippet by ID
- */
 export function loadSnippet(snippetId: SnippetId): string {
   const cached = snippetCache.get(snippetId);
   if (cached) return cached;
 
-  const snippetPath = path.join(getPromptsDir(), 'snippets', `${snippetId}.md`);
+  // Bundled first (Workers)
+  const bundled = bundledSnippets[snippetId];
+  if (bundled) {
+    snippetCache.set(snippetId, bundled);
+    return bundled;
+  }
 
+  // Filesystem fallback (Node.js)
+  const snippetPath = path.join(getPromptsDir(), 'snippets', `${snippetId}.md`);
   try {
     const content = fs.readFileSync(snippetPath, 'utf-8').trim();
     snippetCache.set(snippetId, content);
@@ -45,32 +47,35 @@ export function loadSnippet(snippetId: SnippetId): string {
   }
 }
 
-/**
- * Process snippet includes in a template
- * Replaces {{snippet:name}} with actual snippet content
- */
 function processSnippets(template: string): string {
   return template.replace(/\{\{snippet:(\w[\w-]*)\}\}/g, (_, snippetId) => {
     return loadSnippet(snippetId as SnippetId);
   });
 }
 
-/**
- * Load a prompt by ID
- */
 export function loadPrompt(promptId: PromptId): LoadedPrompt | null {
   const cached = promptCache.get(promptId);
   if (cached) return cached;
 
-  const promptDir = path.join(getPromptsDir(), 'templates', promptId);
+  // Bundled first (Workers)
+  const bundled = bundledPrompts[promptId];
+  if (bundled) {
+    const loaded: LoadedPrompt = {
+      id: promptId,
+      systemPrompt: processSnippets(bundled.system),
+      userPromptTemplate: processSnippets(bundled.user),
+    };
+    promptCache.set(promptId, loaded);
+    return loaded;
+  }
 
+  // Filesystem fallback (Node.js)
+  const promptDir = path.join(getPromptsDir(), 'templates', promptId);
   try {
-    // Load system.md
     const systemPath = path.join(promptDir, 'system.md');
     let systemPrompt = fs.readFileSync(systemPath, 'utf-8').trim();
     systemPrompt = processSnippets(systemPrompt);
 
-    // Load user.md (optional, may not exist)
     const userPath = path.join(promptDir, 'user.md');
     let userPromptTemplate = '';
     try {
@@ -85,7 +90,6 @@ export function loadPrompt(promptId: PromptId): LoadedPrompt | null {
       systemPrompt,
       userPromptTemplate,
     };
-
     promptCache.set(promptId, loaded);
     return loaded;
   } catch (error) {
@@ -94,10 +98,6 @@ export function loadPrompt(promptId: PromptId): LoadedPrompt | null {
   }
 }
 
-/**
- * Interpolate variables in a template
- * Replaces {{variable}} with values from the variables object
- */
 export function interpolateVariables(template: string, variables: Record<string, unknown>): string {
   return template.replace(/\{\{(\w+)\}\}/g, (match, key) => {
     const value = variables[key];
@@ -107,9 +107,6 @@ export function interpolateVariables(template: string, variables: Record<string,
   });
 }
 
-/**
- * Build a complete prompt with variables
- */
 export function buildPrompt(
   promptId: PromptId,
   variables: Record<string, unknown>,
@@ -123,9 +120,6 @@ export function buildPrompt(
   };
 }
 
-/**
- * Clear all caches (useful for development/testing)
- */
 export function clearPromptCache(): void {
   promptCache.clear();
   snippetCache.clear();
